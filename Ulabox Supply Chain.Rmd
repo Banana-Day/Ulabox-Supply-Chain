@@ -1,0 +1,436 @@
+
+---
+title: "Ulabox orders of 2017"
+author: "Anshuman Moudgil"
+date: "30 May 2018"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: readable
+    highlight: tango
+    code_folding: hide
+
+---
+---------------------------------------------------------------
+Kaggle URL: https://www.kaggle.com/anshumoudgil/ulabox-orders-discounts-consumer-behaviour/notebook
+---------------------------------------------------------------
+# Introduction
+
+**Ulabox is a Spanish online grocery supermarket.** In 2017, it bagged more than €1 million per month (or annual revenue of more than €12 millions) and asserts to have more than 95% Customer Satisfaction. The data provided is for 30000 orders that represents approximately 10000 customers.
+
+Ulabox served 8 categories of products in 2017, and seven of the eight categories were served across Spain. **Fresh Food category was served ONLY in 2 cities i.e. Madrid & Barcelona.**
+
+In this notebook I am trying to cover **Ulabox from some of Supply Chain's perspectives.** Lets read further into it and see what data speaks?
+
+# Data
+
+Data was anonymized and only talk in numbers to maintain privacy and propriety of company. 
+
+```{r, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(lattice)
+library(caret)
+
+```
+
+## Description of Data
+
+1. Order: There are 30000 orders and each order has a different number.
+2. Customer: The data is for +10000 customers and they placed multiple orders.
+3. Total Items: Total number of items bought per order per customer on a given day in a given hour.
+4. Discount: Total Discount a customer got - on each order - is given in percentage (or fraction).
+5. Weekday: The day on which an order was placed. Week numbers are not given. Days are from 1 = Monday to 7 = Sunday.
+6. Hour: Hour of the day when order was placed. 0 is midnight and 23 is last hour of the day.
+8 Categories: There are 8 categories and their columns represent "what percentage (or fraction) of total payment was made into each category?"
+
+**Please Note:** Neither the Selling (or Cost) Price per product was given, nor the total payment made per order per customer was stated. This made me take some assumptions for the sake of this analysis. 
+
+```{r, warning=FALSE, message=FALSE}
+
+UB <- read.csv("../input/ulabox_orders_with_categories_partials_2017.csv", header = TRUE)
+UB$customer <- as.factor(UB$customer)
+UB$order <- as.factor(UB$order)
+UB$weekday <- as.factor(UB$weekday)
+UB$hour <- as.factor(UB$hour)
+str(UB)
+```
+
+## Assumptions about Data 
+
+1. Every time a customer places an order she also make its payment (i.e. advance payments).
+2. The percentage of total amount spent per order in each category was after discount. Therefore, if a product is given FREE (or GRATIS) then money spent on that category per order was ZERO percent but it showed up in total items ordered.
+
+3. Each product and each order has identical independently distributed.
+4. Each product has same Selling Price for all the orders (to start with).
+5. Each product has equal discount percentage (to start with).
+6. Orders stated in data were readjusted for cases: where there were products exchange or return or orders cancelled.
+
+7. The Monthly Revenue was multiplied by 12 (extrapolated) to assume Annual Revenue.
+8. In 2017 every month had approximately similar revenue.
+
+9. Transportation or Shipment Cost to customer packaging cost was already included into customer's payment.
+10. Every order was home delivered - across Spain.
+
+**Please Note:** Any change in assumption or addition of new information may change the analyses or the derived conclusions.
+
+## Calculations based on Assumptions & Data
+
+**Annual Revenue** (Million of Euros) = Monthly Revenue x 12 = **€ 12 millions**.
+```{r}
+1 * 12
+```
+
+**Selling Price per item (Euros)** = Annual Revenue/sum of total items = **€ 12.60** per item
+```{r}
+1*12*1000000/sum(UB$total_items)
+```
+
+## First Impressions
+
+1st look of Total Items on histogram to look into statistical distribution of Orders placed (or confirmed demand).
+```{r, warning=FALSE}
+ggplot(UB, aes(total_items))+
+  geom_histogram(binwidth = 3, alpha = 0.63, fill = "red")+
+  theme_bw()+
+  labs(title = "Total Items' on histogram", subtitle = "Apparently data is showing a Log-normal distribution", x = "Total Items per order", y = "Frequency")
+```
+
+Frequency of Customer orders to show TOP 10 loyal customers by Customer ID.
+```{r}
+UB %>% count(customer, sort = TRUE)
+```
+
+**Customer Service** Ulabox asserts to maintain 95% customer service level (at Items per Order). The histogram of Items per Order shows Log-Normal distribution. Hence threshold is calculated using respective formulas.
+
+In supply chain terms - 95% customer service level implies - beyond this threshold the **probability** of delivering **complete order** to customer reduces and there may be a case of Out of Stock at Ulabox's front. 
+```{r}
+Arm <- mean(UB$total_items)
+Sd <- sd(UB$total_items)
+Logm <- log(Arm^2/sqrt(Arm^2+Sd^2))
+LogSd <- sqrt(log(1+(Sd^2/Arm^2)))
+Threshold <- qlnorm(0.95, Logm, LogSd)
+round(Threshold,0)
+```
+
+# Feature Engineering
+
+In this section I have created features with respect to customers, products, and clusters.
+
+## Customer & Products based features
+
+1 First 3 features of Orders' Frequency: per customer, per weekday, and per hour.
+```{r}
+CFreq <- UB %>% count(customer, sort = TRUE)
+colnames(CFreq)[2] <- "cfreq"
+UB <- full_join(UB, CFreq, by = "customer")
+WFreq <- UB %>% count(weekday, sort = FALSE)
+colnames(WFreq)[2] <- "dfreq"
+UB <- full_join(UB, WFreq, by = "weekday")
+HFreq <- UB %>% count(hour, sort = FALSE)
+colnames(HFreq)[2] <- "hfreq"
+UB <- full_join(UB, HFreq, by = "hour")
+
+```
+
+2 Percentage of Amount Paid - **post deduction of Discount**
+```{r}
+UB <- UB %>% mutate(Paid.Pcnt = (1-(discount./100))*100)
+```
+
+3 Total Price Paid per order: based on calculated Selling Price per item **(post discount and based on Assumptions)**
+```{r}
+Price.item <- round(12000000/sum(UB$total_items),2)
+UB <- UB %>% mutate(Paid.Price = total_items*Price.item)
+```
+
+4 Selling Price per order **BEFORE Discount**
+```{r}
+UB$Sell.Price <- if_else(UB$Paid.Pcnt == 0, 0, UB$Paid.Price*100/UB$Paid.Pcnt)
+UB$Sell.Price <- round(UB$Sell.Price,2)
+```
+
+5 Geography served due to Fresh Food category's constraint.
+```{r}
+UB$geo <- if_else(UB$Fresh. >0, "Madrid.Barcelona", "Rest.of.Spain")
+UB$geo <- as.factor(UB$geo)
+```
+
+## k-means Clustering
+
+```{r}
+UB1 <- UB %>% filter(Paid.Pcnt != 100) %>% filter(Food. != 100 & Fresh. != 100 & Drinks. !=100 & Home. != 100 & Beauty. != 100 & Health.!= 100 & Baby. != 100 & Pets.!=100)
+UB2 <- UB1
+UB2$weekday <- NULL
+UB2$hour <- NULL
+preProc <-  preProcess(UB2[3:12])
+UBn <- predict(preProc, UB2)
+set.seed(12)
+UBKm <- kmeans(UBn[3:12], centers = 5, iter.max = 1000)
+
+UBKm1 <- subset(UB1, UBKm$cluster == 1)
+UBKm2 <- subset(UB1, UBKm$cluster == 2)
+UBKm3 <- subset(UB1, UBKm$cluster == 3)
+UBKm4 <- subset(UB1, UBKm$cluster == 4)
+UBKm5 <- subset(UB1, UBKm$cluster == 5)
+
+UBKm1 <- mutate(UBKm1, Clust = "Clust1")
+UBKm2 <- mutate(UBKm2, Clust = "Clust2")
+UBKm3 <- mutate(UBKm3, Clust = "Clust3")
+UBKm4 <- mutate(UBKm4, Clust = "Clust4")
+UBKm5 <- mutate(UBKm5, Clust = "Clust5")
+
+UB3 <- union(UBKm1, UBKm2)
+UB3 <- union(UB3, UBKm3)
+UB3 <- union(UB3, UBKm4)
+UB3 <- union(UB3, UBKm5)
+
+UB3 <- arrange(UB3, order)
+```
+
+Graphical view of Clusters per Weekday - as percentage of amount paid - when categories are clubbed together. 
+
+As per graph below "Rest of Spain" geography is more into Home, Beauty, Health etc. purchase and "Madrid + Barcelona" is more into volumes of Fresh Food, Food etc. Except in Cluster 5 where the contours are almost overlapping.   
+```{r, warning=FALSE}
+UB3 %>% filter(discount.>0) %>% ggplot(aes(y = (Home.+Beauty.+Health.+Baby.+Pets.), x = (Fresh.+Food.+Drinks.)))+
+  geom_violin(aes(color = geo), alpha = 0.001)+
+  facet_grid(weekday~Clust, scales = "free")+
+  theme_light()+
+  labs(title="Percentage share of clubbed Categories", x="Fresh Food + Food + Drinks",y="Home + Beauty + Health + Baby + Pets" ,subtitle="per Cluster - per Weekday (from 1=Monday to 7=Sunday)")
+```
+
+# Pricing or Discount Strategy
+
+Pricing or Discount strategy of Ulabox helps her to adopt **push strategy** for product selling and attract customers to it's website. In this section, I am trying to discover some of those 2017's probably approximate strategies employed by Ulabox.
+
+**Disclaimer:** The strategy options revealed in this analyses are Data & Assumptions based. They **may be probably approximately close and/or may differ from Ulabox's actual strategies.** The conclusions of these analyses may change with any change in input data or assumptions.
+
+## Clusters' average amount paid - Percentage 
+
+Table below shows various variables in 5 Clusters. 
+
+**Cluster 3** is one of the significant ones. It's three categories "Food + Fresh Food + Drinks" represents **+84% (average) of purchase** made with **minimum average discount**.
+
+**Cluster 4** has **maximum average discount** is one of the significant ones. It's 4 categories "Food + Drinks + Home + Beauty" represents **+85% (average) of purchase**.
+
+**Hence this analysis makes me REJECT my ASSUMPTION 5 (section 2.2) that all products have equal discount**
+
+```{r}
+TI.m <- round(tapply(UB3$total_items, UB3$Clust, mean),0)
+Di.m <- round(tapply(UB3$discount., UB3$Clust, mean),1)
+Fo.m <- round(tapply(UB3$Food., UB3$Clust, mean),1)
+Fr.m <- round(tapply(UB3$Fresh., UB3$Clust, mean),1)
+Dr.m <- round(tapply(UB3$Drinks., UB3$Clust, mean),1)
+Ho.m <- round(tapply(UB3$Home., UB3$Clust, mean),1)
+Be.m <- round(tapply(UB3$Beauty., UB3$Clust, mean),1)
+He.m <- round(tapply(UB3$Health., UB3$Clust, mean),1)
+Ba.m <- round(tapply(UB3$Baby., UB3$Clust, mean),1)
+Pe.m <- round(tapply(UB3$Pets., UB3$Clust, mean),1)
+PP.m <- round(tapply(UB3$Paid.Price, UB3$Clust, mean),1)
+
+Mean.Cluster <- matrix(c(TI.m, Di.m, Fo.m, Fr.m, Dr.m, Ho.m, Be.m, He.m, Ba.m, Pe.m, PP.m), nrow = 11, byrow = TRUE)
+colnames(Mean.Cluster) <- c("Cluster1","Cluster2","Cluster3","Cluster4", "Cluster5")
+rownames(Mean.Cluster) <- c("Avg: Total Items","Avg: Discount","Avg: Food","Avg: Fresh","Avg: Drinks","Avg: Home","Avg: Beauty","Avg: Health","Avg: Baby","Avg: Pets", "Avg: Paid Price €")
+Mean.Cluster <- as.table(Mean.Cluster)
+Mean.Cluster
+```
+
+## Without & With Discount - ONE Category Ordered cases
+
+### Without Discount - Average Paid Percentage per Item
+
+Average Paid Percentage per Item - when **ONLY** one of the 8 categories were bought and there was **NO DISCOUNT**.
+```{r}
+BFood <- UB %>% filter(Food. == 100) %>% filter(Paid.Pcnt == 100) %>% mutate(C.per.item = Paid.Pcnt/total_items)
+Food.C <- matrix(c(round(tapply(BFood$C.per.item, BFood$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Food.C) <- c("Food:Avg.SP")
+
+BFresh <- UB %>% filter(Fresh. == 100) %>% filter(Paid.Pcnt == 100) %>% mutate(C.per.item = Paid.Pcnt/total_items)
+Fresh.C <- matrix(c(round(tapply(BFresh$C.per.item, BFresh$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Fresh.C) <- c("Fresh:Avg.SP")
+
+BDrinks <- UB %>% filter(Drinks. == 100) %>% filter(Paid.Pcnt == 100) %>% mutate(C.per.item = Paid.Pcnt/total_items)
+Drinks.C <- matrix(c(round(tapply(BDrinks$C.per.item, BDrinks$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Drinks.C) <- c("Drinks:Avg.SP")
+
+BHome <- UB %>% filter(Home. == 100) %>% filter(Paid.Pcnt == 100) %>% mutate(C.per.item = Paid.Pcnt/total_items)
+Home.C <- matrix(c(round(tapply(BHome$C.per.item, BHome$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Home.C) <- c("Home:Avg.SP")
+
+BBeauty <- UB %>% filter(Beauty. == 100) %>% filter(Paid.Pcnt == 100) %>% mutate(C.per.item = Paid.Pcnt/total_items)
+Beauty.C <- matrix(c(round(tapply(BBeauty$C.per.item, BBeauty$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Beauty.C) <- c("Beauty:Avg.SP")
+
+BHealth <- UB %>% filter(Health. == 100) %>% filter(Paid.Pcnt == 100) %>% mutate(C.per.item = Paid.Pcnt/total_items)
+Health.C <- matrix(c(round(tapply(BHealth$C.per.item, BHealth$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Health.C) <- c("Health:Avg.SP")
+
+BBaby <- UB %>% filter(Baby. == 100) %>% filter(Paid.Pcnt == 100) %>% mutate(C.per.item = Paid.Pcnt/total_items)
+Baby.C <- matrix(c(round(tapply(BBaby$C.per.item, BBaby$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Baby.C) <- c("Baby:Avg.SP")
+
+BPets <- UB %>% filter(Pets. == 100) %>% filter(Paid.Pcnt == 100) %>% mutate(C.per.item = Paid.Pcnt/total_items)
+Pets.C <- matrix(c(round(tapply(BPets$C.per.item, BPets$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Pets.C) <- c("Pets:Avg.SP")
+row.names(Pets.C) <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+Avg.SP.on.item <- cbind(Food.C, Fresh.C, Drinks.C, Home.C, Beauty.C, Health.C, Baby.C, Pets.C)
+Avg.SP.on.item <- as.table(Avg.SP.on.item)
+Avg.SP.on.item
+```
+
+As per graph below **usually** the points are **between 50% to 25%**. This implies when ever there were **ZERO discount** items **customers restricted** their **purchase between 2 to 4 products**. 
+```{r, warning=FALSE}
+Avg.SP.on.item <- data.frame(Avg.SP.on.item)
+Avg.SP.on.item %>% ggplot(aes(y = Freq, x = Var2))+
+  geom_segment( aes(x=Var2, xend=Var2, y=0, yend=Freq))+
+  geom_point(size=4, color="navyblue", fill=alpha("blue", 0.3), alpha=0.81, shape=21, stroke=1)+
+  facet_grid(.~Var1)+
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, size = 8),panel.grid.minor = element_blank())+
+  labs(title ="Without Discount - daily deviations: Paid Percentage per Item per Category", subtitle = "ZERO Discount and only ONE category products were ordered", y = "Paid Percentage (or 100 - Discount)", x = "Product Categories", caption = "Graph Source: r-graph-gallery.com")
+```
+
+### With Discount - Average Discount per Item
+
+Average Discount per Item - when **ONLY** one of the 8 categories were bought and customer had **DISCOUNT**.
+
+**Hence this analysis makes me REJECT my ASSUMPTION 5 (section 2.2) that all products have equal discount**
+
+```{r, warning=FALSE}
+UBFood <- UB %>% filter(Food. == 100) %>% filter(Paid.Pcnt != 100) %>% mutate(Disc.per.item = discount./total_items)
+Food.D.it <- matrix(c(round(tapply(UBFood$Disc.per.item, UBFood$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Food.D.it) <- c("Food:Avg.Dis")
+
+UBFresh <- UB %>% filter(Fresh. == 100) %>% filter(Paid.Pcnt != 100) %>% mutate(Disc.per.item = discount./total_items)
+Fresh.D.it <- matrix(c(round(tapply(UBFresh$Disc.per.item, UBFresh$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Fresh.D.it) <- c("Fresh:Avg.Dis")
+
+UBDrinks <- UB %>% filter(Drinks. == 100) %>% filter(Paid.Pcnt != 100) %>% mutate(Disc.per.item = discount./total_items)
+Drinks.D.it <- matrix(c(round(tapply(UBDrinks$Disc.per.item, UBDrinks$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Drinks.D.it) <- c("Drinks:Avg.Dis")
+
+UBHome <- UB %>% filter(Home. == 100) %>% filter(Paid.Pcnt != 100) %>% mutate(Disc.per.item = discount./total_items)
+Home.D.it <- matrix(c(round(tapply(UBHome$Disc.per.item, UBHome$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Home.D.it) <- c("Home:Avg.Dis")
+
+UBBeauty <- UB %>% filter(Beauty. == 100) %>% filter(Paid.Pcnt != 100) %>% mutate(Disc.per.item = discount./total_items)
+Beauty.D.it <- matrix(c(round(tapply(UBBeauty$Disc.per.item, UBBeauty$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Beauty.D.it) <- c("Beauty:Avg.Dis")
+
+UBHealth <- UB %>% filter(Health. == 100) %>% filter(Paid.Pcnt != 100) %>% mutate(Disc.per.item = discount./total_items)
+Health.D.it <- matrix(c(round(tapply(UBHealth$Disc.per.item, UBHealth$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Health.D.it) <- c("Health:Avg.Dis")
+
+UBBaby <- UB %>% filter(Baby. == 100) %>% filter(Paid.Pcnt != 100) %>% mutate(Disc.per.item = discount./total_items)
+Baby.D.it <- matrix(c(round(tapply(UBBaby$Disc.per.item, UBBaby$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Baby.D.it) <- c("Baby:Avg.Dis")
+
+UBPets <- UB %>% filter(Pets. == 100) %>% filter(Paid.Pcnt != 100) %>% mutate(Disc.per.item = discount./total_items)
+Pets.D.it <- matrix(c(round(tapply(UBPets$Disc.per.item, UBPets$weekday, mean),2)), ncol= 1, byrow = FALSE)
+colnames(Pets.D.it) <- c("Pets:Avg.Dis")
+row.names(Pets.D.it) <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+Avg.Disc.on.item <- cbind(Food.D.it, Fresh.D.it, Drinks.D.it, Home.D.it, Beauty.D.it, Health.D.it, Baby.D.it, Pets.D.it)
+Avg.Disc.on.item <- as.table(Avg.Disc.on.item)
+Avg.Disc.on.item
+```
+
+As per graph below: the average discount - per item - when **only ONE item was purchased** was quite less i.e. discount was less than 10% most of the times.
+```{r, warning=FALSE}
+Avg.Disc.on.item <- data.frame(Avg.Disc.on.item)
+Avg.Disc.on.item %>% ggplot(aes(y = Freq, x = Var2))+
+  geom_segment( aes(x=Var2, xend=Var2, y=0, yend=Freq), color ="red")+
+  geom_point(size=6.3, color="red", fill=alpha("white", 0.1), alpha=0.81, shape=21, stroke=1)+
+  facet_grid(.~Var1)+
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, size = 8),panel.grid.minor = element_blank())+
+  labs(title ="With Discount per Item per Category - daily deviations", subtitle = "IF only ONE of the 8 categories products were ordered", y = "Discount(%)", x = "Product Categories", caption = "Graph Source: r-graph-gallery.com")
+```
+
+## Geography based Average Discounts
+
+**Average Discount** bagged by customers of **Madrid+Barcelona** is **less** than to **Rest of Spain** due to exclusive Fresh Food category for Madrid+Barcelona.
+
+**Hence this analysis makes me REJECT my ASSUMPTION 5 (section 2.2) that all products have equal discount**
+```{r, warning=FALSE}
+UB%>% filter(discount. >0) %>% ggplot(aes(x = total_items, y = discount.))+
+  geom_density_2d(aes(),col = "royalblue", alpha = 0.9)+
+  facet_grid(geo~weekday, scales = "free")+
+  theme_bw()+
+  labs(title = "Total Items vs. Discount", subtitle = "Average Discounts are less for 'Mardid+Barcelona' than for 'Rest of Spain'", x = "Total Items (units)", y = "Discount (%)")
+```
+
+
+# Consumers' Buying Patterns
+
+Biggest Orders were placed on Mondays & then on Sundays
+```{r}
+UB %>% count(weekday, sort = FALSE)
+```
+
+Customer orders were most in night from 9PM to 10 PM and in daytime max orders were placed in the hours starting from 11 AM to just before 1 PM. 
+```{r}
+UB %>% count(hour, sort = TRUE)
+```
+Linear Regression used on Ulabox's data sets - when separated by day - gives a unique insight into customer's behaviour.
+
+Based on Linear Regression quoted below - taken individually for each day of the week - following are the observations about consumer behaviour. Or as in Linear Regression terms these categories were significant and they actively contribute towards increased "Total Items" purchased. When they were significant across week (globally)?.
+
+1. Thursday was the day when consumers buy products of almost all categories.
+2. Customers of Ulabox purchased **Fresh Food + Food** category products **every other day** (or that contributes towards high volumes purchased.)
+3. Home & Beauty products were significant on Tuesdays and Fridays
+
+**Please Note:** Individual items purchased either on discount or without discount were separated from this list.
+
+Customers used Ulabox everyday for purchase. I am publishing Linear Regression of Day 4 (or Thursday) only to make a representation.
+
+```{r}
+UB4 <- UB3 %>% filter(weekday == 4)
+UB4Reg <- lm(total_items ~ Food. + Fresh. + Drinks. + Home. + Beauty. + Health. + Baby. + Pets., data = UB4)
+summary(UB4Reg)
+```
+
+# Conclusions
+
+1. Spanish consumers from Ulabox like discounts.
+2. Fresh Food category products - though only sold in Madrid & Barcelona - has relatively low levels of discounts.
+3. Global service level of 95% (as stated in literature) may be quite high & may be leading to high inventory levels. So I suggest; some relaxation in customer service (or 95% ) may be played with at category mix level.
+4. Fresh Food category should maintain high service levels.
+
+# Ulabox's inputs on Assumptions
+
+Post publication of this notebook [Ulabox](https://www.ulabox.com) Lead Senior Developer [Julio Matinez](https://www.kaggle.com/liopic) appreciated the analysis and gave inputs about the **Assumptions (section 2.2)** made. His inputs gives further insights into Ulabox's pricing mechanisms. These inputs made me add a new section to this notebook. My gratitude to Ulabox & their team.
+
+The inputs were made on 8 out of 10 Assumptions (you can read them in comments section), but for brevity I'll only rewrite about points where Ulabox apparently differed. In fact, **I second on all the points where they differed.** For readers of this note book I'll try to show **WHY** there were apparent differences and **HOW** to read them?
+
+* **Point 1**: 4 out of 8 assumptions were in coherence with what Ulabox was doing in 2017.
+
+* **Point 2**: Calculated Selling Price by me is €12 (approximate) and the one stated by Ulabox is €7 (with large variations). 
+
+Ulabox is right in stating this figure and I agree with them. In my opinion, the difference between figures is due to calculation methodology. I am calculating average Selling Price using **Simple Average** (due to lack of data) where as Ulabox may be calculating it using **Weighted Average.** 
+
+Average Price calculations based on weights (e.g. based on volumes or costs or some other criteria) is a general practice in companies.
+
+* **Point 3**: Each Product has equal discount (to start with). 
+
+Ulabox didn't agree with it as they said "...it opens with strong promotions that last for a week or less. ...So some products are purchased with discount and some without". I agree with them.
+
+The difference is I started with this "Each Product has Equal Discount" but later in various graphs and tables I my self have **rejected this assumption**. Post inputs, I have already updated those sections accordingly.
+
+* **Point4**: "The **percentage of total amount spent** per order was **after discount**. Therefore, if a product is free then money spent on that category per order was ZERO but it showed up in total items ordered".
+
+Ulabox didn't agree. Quoting example of "Order ID 965", they stated the "...in cases where there is **100% discount** (or free order) the **category partials still reflect the money spent without** taking into account the **discount**".
+
+In my opinion this NEW input may change various analysis.
+
+* **Point 5**: "Order stated in data was readjusted for cases where there were product exchange or return or order cancelled".
+
+Ulabox said, "The dataset does not include cases of cancelled orders or product repositions."
+
+This information input does not influence my analyses.
+
+Thanks for reading this notebook. Please do up-vote and write your comments - if you like it.
+
+Best Regards
